@@ -44,7 +44,7 @@ jobs:
             --cpu=2
             --concurrency=10
             --timeout=900
-            --set-env-vars=PORT=11235
+            --port=11235
             --max-instances=50
 
       - name: Show the URL
