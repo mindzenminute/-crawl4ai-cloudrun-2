@@ -1,0 +1,54 @@
+name: Deploy Crawl4AI (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_id:
+        description: "GCP Project ID"
+        required: true
+      region:
+        description: "Cloud Run region"
+        required: true
+        default: "us-central1"
+      service:
+        description: "Cloud Run service name"
+        required: true
+        default: "crawl4ai-api"
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Auth to GCP (Service Account key)
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy the public Crawl4AI image to Cloud Run
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          project_id: ${{ inputs.project_id }}
+          service: ${{ inputs.service }}
+          region: ${{ inputs.region }}
+          image: docker.io/unclecode/crawl4ai:latest
+          flags: >-
+            --allow-unauthenticated
+            --memory=2Gi
+            --cpu=2
+            --concurrency=10
+            --timeout=900
+            --set-env-vars=PORT=11235
+            --max-instances=50
+
+      - name: Show the URL
+        run: |
+          echo "URL: ${{ steps.deploy.outputs.url }}"
+          echo "### ✅ Déploiement réussi" >> $GITHUB_STEP_SUMMARY
+          echo "**URL**: ${{ steps.deploy.outputs.url }}" >> $GITHUB_STEP_SUMMARY
