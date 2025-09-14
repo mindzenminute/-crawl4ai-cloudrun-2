@@ -1,4 +1,4 @@
-name: Deploy Crawl4AI (manual)
+name: Deploy Crawl4AI (private)
 
 on:
   workflow_dispatch:
@@ -14,6 +14,14 @@ on:
         description: "Cloud Run service name"
         required: true
         default: "crawl4ai-api"
+      port:
+        description: "Container port"
+        required: true
+        default: "11235"
+      invokers:
+        description: "Identités autorisées à appeler (séparées par virgule ou retour ligne). Ex: serviceAccount:n8n-invoker@PROJET.iam.gserviceaccount.com"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -22,6 +30,10 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout (optional)
+        uses: actions/checkout@v4
+
+      # 🔐 Auth avec clé JSON de Service Account stockée dans le secret GCP_SA_KEY
       - name: Auth to GCP (Service Account key)
         uses: google-github-actions/auth@v2
         with:
@@ -30,7 +42,8 @@ jobs:
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Deploy the public Crawl4AI image to Cloud Run
+      # ✅ Déploiement PRIVÉ (note: pas de --allow-unauthenticated)
+      - name: Deploy to Cloud Run (private)
         id: deploy
         uses: google-github-actions/deploy-cloudrun@v2
         with:
@@ -39,16 +52,48 @@ jobs:
           region: ${{ inputs.region }}
           image: docker.io/unclecode/crawl4ai:latest
           flags: >-
-            --allow-unauthenticated
+            --port=${{ inputs.port }}
             --memory=2Gi
             --cpu=2
             --concurrency=10
             --timeout=900
-            --port=11235
             --max-instances=50
 
-      - name: Show the URL
+      # 🧹 S’assurer que l’accès public est bien retiré (ignore l’erreur si déjà privé)
+      - name: Ensure service is private (remove public invoker)
         run: |
-          echo "URL: ${{ steps.deploy.outputs.url }}"
-          echo "### ✅ Déploiement réussi" >> $GITHUB_STEP_SUMMARY
-          echo "**URL**: ${{ steps.deploy.outputs.url }}" >> $GITHUB_STEP_SUMMARY
+          set -e
+          gcloud config set project "${{ inputs.project_id }}"
+          gcloud run services remove-iam-policy-binding "${{ inputs.service }}" \
+            --region="${{ inputs.region }}" \
+            --member="allUsers" \
+            --role="roles/run.invoker" || true
+
+      # 🎫 Donner le badge "run.invoker" aux identités que TU choisis (facultatif)
+      - name: Grant run.invoker to allowed callers
+        if: ${{ inputs.invokers != '' }}
+        run: |
+          set -e
+          gcloud config set project "${{ inputs.project_id }}"
+          IFS=$'\n,' read -r -a MEMBERS <<< "${{ inputs.invokers }}"
+          for m in "${MEMBERS[@]}"; do
+            M=$(echo "$m" | xargs)    # trim
+            [[ -z "$M" ]] && continue
+            # Si l'utilisateur n'a pas précisé le préfixe, on suppose un service account
+            if [[ "$M" != *":"* ]]; then
+              M="serviceAccount:${M}"
+            fi
+            echo "Granting roles/run.invoker to $M"
+            gcloud run services add-iam-policy-binding "${{ inputs.service }}" \
+              --region="${{ inputs.region }}" \
+              --member="$M" \
+              --role="roles/run.invoker"
+          done
+
+      # 🔗 Afficher l’URL (elle demandera un ID token, normal : service privé)
+      - name: Show URL
+        run: |
+          URL=$(gcloud run services describe "${{ inputs.service }}" --region="${{ inputs.region }}" --format='value(status.url)')
+          echo "URL (auth requise): ${URL}"
+          echo "### ✅ Déploiement privé réussi" >> $GITHUB_STEP_SUMMARY
+          echo "**URL** (auth requise): ${URL}" >> $GITHUB_STEP_SUMMARY
