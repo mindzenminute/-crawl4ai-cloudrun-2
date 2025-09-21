@@ -58,6 +58,7 @@ jobs:
             --concurrency=10
             --timeout=900
             --max-instances=50
+            --set-secrets=GEMINI_API_KEY=GEMINI_API_KEY:latest
 
       # 🧹 S’assurer que l’accès public est bien retiré (ignore l’erreur si déjà privé)
       - name: Ensure service is private (remove public invoker)
