@@ -22,6 +22,10 @@ on:
         description: "Identités autorisées à appeler (séparées par virgule ou retour ligne). Ex: serviceAccount:n8n-invoker@PROJET.iam.gserviceaccount.com"
         required: false
         default: ""
+      runtime_sa:
+        description: "Service Account d'exécution Cloud Run (optionnel). Si vide => <PROJECT_NUMBER>-compute@developer.gserviceaccount.com"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -29,6 +33,9 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      CLOUDSDK_CORE_PROJECT: ${{ inputs.project_id }}  # évite les overrides
+
     steps:
       - name: Checkout (optional)
         uses: actions/checkout@v4
@@ -41,6 +48,35 @@ jobs:
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
+
+      # 🔎 Résoudre le SA runtime (si non fourni, utiliser <PROJECT_NUMBER>-compute@developer.gserviceaccount.com)
+      - name: Resolve runtime Service Account
+        id: rsaname
+        shell: bash
+        run: |
+          set -e
+          PROJECT_ID="${{ inputs.project_id }}"
+          WANT="${{ inputs.runtime_sa }}"
+          if [[ -n "$WANT" ]]; then
+            echo "runtime_sa=$WANT" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+          DEFAULT_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+          echo "runtime_sa=$DEFAULT_SA" >> "$GITHUB_OUTPUT"
+
+      # 🔐 Donner au SA d'exécution l'accès au secret GEMINI_API_KEY
+      # (si le secret n'existe pas encore, cette étape échouera : crée-le d'abord ou rends cette étape tolérante)
+      - name: Grant Secret Manager accessor to runtime SA
+        shell: bash
+        run: |
+          set -e
+          RUNTIME_SA="${{ steps.rsaname.outputs.runtime_sa }}"
+          echo "Granting roles/secretmanager.secretAccessor on GEMINI_API_KEY to $RUNTIME_SA"
+          gcloud secrets add-iam-policy-binding GEMINI_API_KEY \
+            --member="serviceAccount:${RUNTIME_SA}" \
+            --role="roles/secretmanager.secretAccessor" \
+            --project="${{ inputs.project_id }}"
 
       # ✅ Déploiement PRIVÉ (note: pas de --allow-unauthenticated)
       - name: Deploy to Cloud Run (private)
@@ -58,15 +94,16 @@ jobs:
             --concurrency=10
             --timeout=900
             --max-instances=50
+            --service-account=${{ steps.rsaname.outputs.runtime_sa }}
             --set-secrets=GEMINI_API_KEY=GEMINI_API_KEY:latest
 
       # 🧹 S’assurer que l’accès public est bien retiré (ignore l’erreur si déjà privé)
       - name: Ensure service is private (remove public invoker)
         run: |
           set -e
-          gcloud config set project "${{ inputs.project_id }}"
           gcloud run services remove-iam-policy-binding "${{ inputs.service }}" \
             --region="${{ inputs.region }}" \
+            --project="${{ inputs.project_id }}" \
             --member="allUsers" \
             --role="roles/run.invoker" || true
 
@@ -75,18 +112,17 @@ jobs:
         if: ${{ inputs.invokers != '' }}
         run: |
           set -e
-          gcloud config set project "${{ inputs.project_id }}"
           IFS=$'\n,' read -r -a MEMBERS <<< "${{ inputs.invokers }}"
           for m in "${MEMBERS[@]}"; do
             M=$(echo "$m" | xargs)    # trim
             [[ -z "$M" ]] && continue
-            # Si l'utilisateur n'a pas précisé le préfixe, on suppose un service account
             if [[ "$M" != *":"* ]]; then
               M="serviceAccount:${M}"
             fi
             echo "Granting roles/run.invoker to $M"
             gcloud run services add-iam-policy-binding "${{ inputs.service }}" \
               --region="${{ inputs.region }}" \
+              --project="${{ inputs.project_id }}" \
               --member="$M" \
               --role="roles/run.invoker"
           done
@@ -94,7 +130,7 @@ jobs:
       # 🔗 Afficher l’URL (elle demandera un ID token, normal : service privé)
       - name: Show URL
         run: |
-          URL=$(gcloud run services describe "${{ inputs.service }}" --region="${{ inputs.region }}" --format='value(status.url)')
+          URL=$(gcloud run services describe "${{ inputs.service }}" --region="${{ inputs.region }}" --project="${{ inputs.project_id }}" --format='value(status.url)')
           echo "URL (auth requise): ${URL}"
           echo "### ✅ Déploiement privé réussi" >> $GITHUB_STEP_SUMMARY
           echo "**URL** (auth requise): ${URL}" >> $GITHUB_STEP_SUMMARY
